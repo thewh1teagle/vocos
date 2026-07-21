@@ -93,6 +93,9 @@ trainer:
   max_steps: 800000
   # You might want to limit val batches when evaluating all the metrics, as they are time-consuming
   limit_val_batches: 100
+  # Validate (and therefore checkpoint) every 2000 steps rather than once per epoch, so an unattended
+  # long-running fine-tune never loses more than ~2000 steps of progress to a crash/preemption.
+  val_check_interval: 2000
   accelerator: gpu
   strategy: auto
   devices: [0]
