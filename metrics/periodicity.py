@@ -1,3 +1,9 @@
+"""
+torchcrepe is only needed for this file (pitch/periodicity metrics). It is
+not a project dependency; install separately with:
+    uv pip install torchcrepe
+"""
+
 import librosa
 import numpy as np
 import torch
