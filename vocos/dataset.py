@@ -55,8 +55,13 @@ class VocosDataset(Dataset):
         if y.size(0) > 1:
             # mix to mono
             y = y.mean(dim=0, keepdim=True)
+        # Peak-normalize so the highest sample sits at `gain` dBFS. Equivalent to the sox "norm <gain>"
+        # effect used here before torchaudio.sox_effects was removed in torchaudio 2.9 (verified against
+        # the sox binary: identical output up to 16-bit quantization).
         gain = np.random.uniform(-1, -6) if self.train else -3
-        y, _ = torchaudio.sox_effects.apply_effects_tensor(y, sr, [["norm", f"{gain:.2f}"]])
+        peak = y.abs().max()
+        if peak > 0:
+            y = y * (10 ** (gain / 20) / peak)
         if sr != self.sampling_rate:
             y = torchaudio.functional.resample(y, orig_freq=sr, new_freq=self.sampling_rate)
         if y.size(-1) < self.num_samples:

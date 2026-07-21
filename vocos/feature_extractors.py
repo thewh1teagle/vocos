@@ -2,7 +2,6 @@ from typing import List
 
 import torch
 import torchaudio
-from encodec import EncodecModel
 from torch import nn
 
 from vocos.modules import safe_log
@@ -57,6 +56,9 @@ class EncodecFeatures(FeatureExtractor):
         train_codebooks: bool = False,
     ):
         super().__init__()
+        # Lazy import: encodec is only needed for this feature extractor (available via the `train` extra)
+        from encodec import EncodecModel
+
         if encodec_model == "encodec_24khz":
             encodec = EncodecModel.encodec_model_24khz
         elif encodec_model == "encodec_48khz":
