@@ -162,3 +162,9 @@ cython_debug/
 logs/
 *.pt
 *.ckpt
+# example run artifacts
+input.wav
+reconstructed.wav
+*.wav
+data/
+runs/

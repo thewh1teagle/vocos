@@ -1,0 +1,102 @@
+# pytorch_lightning==1.8.6
+# Fine-tunes the pretrained non-causal charactr/vocos-mel-24khz checkpoint into a causal model
+# suitable for streaming inference (see vocos/streaming.py).
+seed_everything: 4444
+
+data:
+  class_path: vocos.dataset.VocosDataModule
+  init_args:
+    train_params:
+      filelist_path: data/filelist.train.mixed
+      sampling_rate: 24000
+      num_samples: 16384
+      batch_size: 16
+      num_workers: 8
+
+    val_params:
+      filelist_path: data/filelist.val
+      sampling_rate: 24000
+      num_samples: 48384
+      batch_size: 16
+      num_workers: 8
+
+model:
+  class_path: vocos.experiment.VocosExp
+  init_args:
+    sample_rate: 24000
+    # Reduced from 5e-4: the generator is warm-started, only the causal kernels need to adapt.
+    initial_learning_rate: 1e-4
+    mel_loss_coeff: 45
+    mrd_loss_coeff: 0.1
+    num_warmup_steps: 0 # Optimizers warmup steps
+    pretrain_mel_steps: 0  # 0 means GAN objective from the first iteration
+
+    # Warm-start backbone + head from the pretrained non-causal checkpoint (HF repo id or local path).
+    # Weight shapes are identical between causal and non-causal models.
+    pretrained_generator_checkpoint: charactr/vocos-mel-24khz
+
+    # automatic evaluation
+    evaluate_utmos: false  # requires fairseq, not installable on this stack
+    evaluate_pesq: true
+    evaluate_periodicty: false  # requires librosa/torchcrepe
+
+    feature_extractor:
+      class_path: vocos.feature_extractors.MelSpectrogramFeatures
+      init_args:
+        sample_rate: 24000
+        n_fft: 1024
+        hop_length: 256
+        n_mels: 100
+        padding: same
+
+    backbone:
+      class_path: vocos.models.VocosBackbone
+      init_args:
+        input_channels: 100
+        dim: 512
+        intermediate_dim: 1536
+        num_layers: 8
+        causal: true
+        # Total future frames the model may see. 0 = strictly causal (~32 ms ISTFT latency only).
+        # 4 adds ~43 ms of latency (4 * 256 / 24000) but recovers most of the quality gap.
+        lookahead_frames: 4
+
+    head:
+      class_path: vocos.heads.ISTFTHead
+      init_args:
+        dim: 512
+        n_fft: 1024
+        hop_length: 256
+        # "same" is required for streaming inference (VocosStreamer); "center" is not supported there.
+        padding: same
+
+trainer:
+  logger:
+    class_path: pytorch_lightning.loggers.TensorBoardLogger
+    init_args:
+      save_dir: logs/
+  callbacks:
+    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
+    - class_path: pytorch_lightning.callbacks.ModelSummary
+      init_args:
+        max_depth: 2
+    - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val_loss
+        filename: vocos_causal_checkpoint_{epoch}_{step}_{val_loss:.4f}
+        save_top_k: 3
+        save_last: true
+    - class_path: vocos.helpers.GradNormCallback
+
+  # Lightning calculates max_steps across all optimizer steps (rather than number of batches)
+  # This equals to 400k steps per generator and 400k per discriminator — a fine-tune, not a full run.
+  max_steps: 800000
+  # You might want to limit val batches when evaluating all the metrics, as they are time-consuming
+  limit_val_batches: 100
+  # Validate (and therefore checkpoint) every 2000 steps rather than once per epoch, so an unattended
+  # long-running fine-tune never loses more than ~2000 steps of progress to a crash/preemption.
+  val_check_interval: 2000
+  accelerator: gpu
+  strategy: auto
+  devices: [0]
+  log_every_n_steps: 100

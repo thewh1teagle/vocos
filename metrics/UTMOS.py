@@ -1,3 +1,9 @@
+"""
+fairseq is only needed for this file (loads the wav2vec_small SSL backbone
+used by UTMOS). It is not a project dependency; install separately with:
+    uv pip install fairseq
+"""
+
 import os
 
 import fairseq

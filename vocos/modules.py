@@ -15,6 +15,10 @@ class ConvNeXtBlock(nn.Module):
             Defaults to None.
         adanorm_num_embeddings (int, optional): Number of embeddings for AdaLayerNorm.
             None means non-conditional LayerNorm. Defaults to None.
+        lookahead (int, optional): Number of future frames the depthwise conv may attend to, in [0, 3].
+            None (default) keeps the original symmetric padding (3 past, 3 future). 0 makes the block
+            strictly causal. Padding is always (6 - lookahead, lookahead), so the receptive field size
+            and output length are unchanged and pretrained weights remain loadable.
     """
 
     def __init__(
@@ -23,9 +27,19 @@ class ConvNeXtBlock(nn.Module):
         intermediate_dim: int,
         layer_scale_init_value: float,
         adanorm_num_embeddings: Optional[int] = None,
+        lookahead: Optional[int] = None,
     ):
         super().__init__()
-        self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
+        if lookahead is None:
+            self.pad = None
+            self.lookahead = 3
+            self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
+        else:
+            if not 0 <= lookahead <= 3:
+                raise ValueError("lookahead must be in [0, 3]")
+            self.pad = (6 - lookahead, lookahead)
+            self.lookahead = lookahead
+            self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=0, groups=dim)  # depthwise conv
         self.adanorm = adanorm_num_embeddings is not None
         if adanorm_num_embeddings:
             self.norm = AdaLayerNorm(adanorm_num_embeddings, dim, eps=1e-6)
@@ -42,6 +56,8 @@ class ConvNeXtBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, cond_embedding_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         residual = x
+        if self.pad is not None:
+            x = torch.nn.functional.pad(x, self.pad)
         x = self.dwconv(x)
         x = x.transpose(1, 2)  # (B, C, T) -> (B, T, C)
         if self.adanorm:

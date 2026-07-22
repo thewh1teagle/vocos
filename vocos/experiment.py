@@ -1,10 +1,13 @@
 import math
+import os
+from typing import Optional
 
 import numpy as np
 import pytorch_lightning as pl
 import torch
 import torchaudio
 import transformers
+from huggingface_hub import hf_hub_download
 
 from vocos.discriminators import MultiPeriodDiscriminator, MultiResolutionDiscriminator
 from vocos.feature_extractors import FeatureExtractor
@@ -32,6 +35,7 @@ class VocosExp(pl.LightningModule):
         evaluate_utmos: bool = False,
         evaluate_pesq: bool = False,
         evaluate_periodicty: bool = False,
+        pretrained_generator_checkpoint: Optional[str] = None,
     ):
         """
         Args:
@@ -48,13 +52,33 @@ class VocosExp(pl.LightningModule):
             evaluate_utmos (bool, optional): If True, UTMOS scores are computed for each validation run.
             evaluate_pesq (bool, optional): If True, PESQ scores are computed for each validation run.
             evaluate_periodicty (bool, optional): If True, periodicity scores are computed for each validation run.
+            pretrained_generator_checkpoint (str, optional): Warm-start the generator (backbone and head) from
+                a pretrained inference checkpoint before training. Either a local path to a `pytorch_model.bin`
+                state dict or a Hugging Face repo id (e.g. "charactr/vocos-mel-24khz"). Weight shapes must match;
+                this also works for fine-tuning a causal backbone from a non-causal checkpoint.
+                Discriminators are left randomly initialized.
         """
         super().__init__()
         self.save_hyperparameters(ignore=["feature_extractor", "backbone", "head"])
+        # Lightning >= 2.0 does not support multiple optimizers with automatic optimization
+        self.automatic_optimization = False
+        self.validation_step_outputs = []
 
         self.feature_extractor = feature_extractor
         self.backbone = backbone
         self.head = head
+
+        if pretrained_generator_checkpoint is not None:
+            if os.path.isfile(pretrained_generator_checkpoint):
+                model_path = pretrained_generator_checkpoint
+            else:
+                model_path = hf_hub_download(repo_id=pretrained_generator_checkpoint, filename="pytorch_model.bin")
+            state_dict = torch.load(model_path, map_location="cpu")
+            for module, prefix in [(self.backbone, "backbone."), (self.head, "head.")]:
+                sub_state_dict = {
+                    key[len(prefix):]: value for key, value in state_dict.items() if key.startswith(prefix)
+                }
+                module.load_state_dict(sub_state_dict)
 
         self.multiperioddisc = MultiPeriodDiscriminator()
         self.multiresddisc = MultiResolutionDiscriminator()
@@ -100,11 +124,13 @@ class VocosExp(pl.LightningModule):
         audio_output = self.head(x)
         return audio_output
 
-    def training_step(self, batch, batch_idx, optimizer_idx, **kwargs):
+    def training_step(self, batch, batch_idx, **kwargs):
         audio_input = batch
+        opt_disc, opt_gen = self.optimizers()
+        sch_disc, sch_gen = self.lr_schedulers()
 
         # train discriminator
-        if optimizer_idx == 0 and self.train_discriminator:
+        if self.train_discriminator:
             with torch.no_grad():
                 audio_hat = self(audio_input, **kwargs)
 
@@ -123,69 +149,75 @@ class VocosExp(pl.LightningModule):
             self.log("discriminator/total", loss, prog_bar=True)
             self.log("discriminator/multi_period_loss", loss_mp)
             self.log("discriminator/multi_res_loss", loss_mrd)
-            return loss
+
+            opt_disc.zero_grad()
+            self.manual_backward(loss)
+            opt_disc.step()
+            sch_disc.step()
 
         # train generator
-        if optimizer_idx == 1:
-            audio_hat = self(audio_input, **kwargs)
-            if self.train_discriminator:
-                _, gen_score_mp, fmap_rs_mp, fmap_gs_mp = self.multiperioddisc(
-                    y=audio_input, y_hat=audio_hat, **kwargs,
-                )
-                _, gen_score_mrd, fmap_rs_mrd, fmap_gs_mrd = self.multiresddisc(
-                    y=audio_input, y_hat=audio_hat, **kwargs,
-                )
-                loss_gen_mp, list_loss_gen_mp = self.gen_loss(disc_outputs=gen_score_mp)
-                loss_gen_mrd, list_loss_gen_mrd = self.gen_loss(disc_outputs=gen_score_mrd)
-                loss_gen_mp = loss_gen_mp / len(list_loss_gen_mp)
-                loss_gen_mrd = loss_gen_mrd / len(list_loss_gen_mrd)
-                loss_fm_mp = self.feat_matching_loss(fmap_r=fmap_rs_mp, fmap_g=fmap_gs_mp) / len(fmap_rs_mp)
-                loss_fm_mrd = self.feat_matching_loss(fmap_r=fmap_rs_mrd, fmap_g=fmap_gs_mrd) / len(fmap_rs_mrd)
-
-                self.log("generator/multi_period_loss", loss_gen_mp)
-                self.log("generator/multi_res_loss", loss_gen_mrd)
-                self.log("generator/feature_matching_mp", loss_fm_mp)
-                self.log("generator/feature_matching_mrd", loss_fm_mrd)
-            else:
-                loss_gen_mp = loss_gen_mrd = loss_fm_mp = loss_fm_mrd = 0
-
-            mel_loss = self.melspec_loss(audio_hat, audio_input)
-            loss = (
-                loss_gen_mp
-                + self.hparams.mrd_loss_coeff * loss_gen_mrd
-                + loss_fm_mp
-                + self.hparams.mrd_loss_coeff * loss_fm_mrd
-                + self.mel_loss_coeff * mel_loss
+        audio_hat = self(audio_input, **kwargs)
+        if self.train_discriminator:
+            _, gen_score_mp, fmap_rs_mp, fmap_gs_mp = self.multiperioddisc(
+                y=audio_input, y_hat=audio_hat, **kwargs,
             )
+            _, gen_score_mrd, fmap_rs_mrd, fmap_gs_mrd = self.multiresddisc(
+                y=audio_input, y_hat=audio_hat, **kwargs,
+            )
+            loss_gen_mp, list_loss_gen_mp = self.gen_loss(disc_outputs=gen_score_mp)
+            loss_gen_mrd, list_loss_gen_mrd = self.gen_loss(disc_outputs=gen_score_mrd)
+            loss_gen_mp = loss_gen_mp / len(list_loss_gen_mp)
+            loss_gen_mrd = loss_gen_mrd / len(list_loss_gen_mrd)
+            loss_fm_mp = self.feat_matching_loss(fmap_r=fmap_rs_mp, fmap_g=fmap_gs_mp) / len(fmap_rs_mp)
+            loss_fm_mrd = self.feat_matching_loss(fmap_r=fmap_rs_mrd, fmap_g=fmap_gs_mrd) / len(fmap_rs_mrd)
 
-            self.log("generator/total_loss", loss, prog_bar=True)
-            self.log("mel_loss_coeff", self.mel_loss_coeff)
-            self.log("generator/mel_loss", mel_loss)
+            self.log("generator/multi_period_loss", loss_gen_mp)
+            self.log("generator/multi_res_loss", loss_gen_mrd)
+            self.log("generator/feature_matching_mp", loss_fm_mp)
+            self.log("generator/feature_matching_mrd", loss_fm_mrd)
+        else:
+            loss_gen_mp = loss_gen_mrd = loss_fm_mp = loss_fm_mrd = 0
 
-            if self.global_step % 1000 == 0 and self.global_rank == 0:
-                self.logger.experiment.add_audio(
-                    "train/audio_in", audio_input[0].data.cpu(), self.global_step, self.hparams.sample_rate
-                )
-                self.logger.experiment.add_audio(
-                    "train/audio_pred", audio_hat[0].data.cpu(), self.global_step, self.hparams.sample_rate
-                )
-                with torch.no_grad():
-                    mel = safe_log(self.melspec_loss.mel_spec(audio_input[0]))
-                    mel_hat = safe_log(self.melspec_loss.mel_spec(audio_hat[0]))
-                self.logger.experiment.add_image(
-                    "train/mel_target",
-                    plot_spectrogram_to_numpy(mel.data.cpu().numpy()),
-                    self.global_step,
-                    dataformats="HWC",
-                )
-                self.logger.experiment.add_image(
-                    "train/mel_pred",
-                    plot_spectrogram_to_numpy(mel_hat.data.cpu().numpy()),
-                    self.global_step,
-                    dataformats="HWC",
-                )
+        mel_loss = self.melspec_loss(audio_hat, audio_input)
+        loss = (
+            loss_gen_mp
+            + self.hparams.mrd_loss_coeff * loss_gen_mrd
+            + loss_fm_mp
+            + self.hparams.mrd_loss_coeff * loss_fm_mrd
+            + self.mel_loss_coeff * mel_loss
+        )
 
-            return loss
+        self.log("generator/total_loss", loss, prog_bar=True)
+        self.log("mel_loss_coeff", self.mel_loss_coeff)
+        self.log("generator/mel_loss", mel_loss)
+
+        opt_gen.zero_grad()
+        self.manual_backward(loss)
+        opt_gen.step()
+        sch_gen.step()
+
+        if self.global_step % 1000 == 0 and self.global_rank == 0:
+            self.logger.experiment.add_audio(
+                "train/audio_in", audio_input[0].data.cpu(), self.global_step, self.hparams.sample_rate
+            )
+            self.logger.experiment.add_audio(
+                "train/audio_pred", audio_hat[0].data.cpu(), self.global_step, self.hparams.sample_rate
+            )
+            with torch.no_grad():
+                mel = safe_log(self.melspec_loss.mel_spec(audio_input[0]))
+                mel_hat = safe_log(self.melspec_loss.mel_spec(audio_hat[0]))
+            self.logger.experiment.add_image(
+                "train/mel_target",
+                plot_spectrogram_to_numpy(mel.data.cpu().numpy()),
+                self.global_step,
+                dataformats="HWC",
+            )
+            self.logger.experiment.add_image(
+                "train/mel_pred",
+                plot_spectrogram_to_numpy(mel_hat.data.cpu().numpy()),
+                self.global_step,
+                dataformats="HWC",
+            )
 
     def on_validation_epoch_start(self):
         if self.hparams.evaluate_utmos:
@@ -227,6 +259,19 @@ class VocosExp(pl.LightningModule):
         mel_loss = self.melspec_loss(audio_hat.unsqueeze(1), audio_input.unsqueeze(1))
         total_loss = mel_loss + (5 - utmos_score) + (5 - pesq_score)
 
+        self.validation_step_outputs.append(
+            {
+                "val_loss": total_loss,
+                "mel_loss": mel_loss,
+                "utmos_score": utmos_score,
+                "pesq_score": pesq_score,
+                "periodicity_loss": periodicity_loss,
+                "pitch_loss": pitch_loss,
+                "f1_score": f1_score,
+                "audio_input": audio_input[0],
+                "audio_pred": audio_hat[0],
+            }
+        )
         return {
             "val_loss": total_loss,
             "mel_loss": mel_loss,
@@ -239,7 +284,8 @@ class VocosExp(pl.LightningModule):
             "audio_pred": audio_hat[0],
         }
 
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
+        outputs = self.validation_step_outputs
         if self.global_rank == 0:
             *_, audio_in, audio_pred = outputs[0].values()
             self.logger.experiment.add_audio(
@@ -277,6 +323,7 @@ class VocosExp(pl.LightningModule):
         self.log("val/periodicity_loss", periodicity_loss, sync_dist=True)
         self.log("val/pitch_loss", pitch_loss, sync_dist=True)
         self.log("val/f1_score", f1_score, sync_dist=True)
+        self.validation_step_outputs.clear()
 
     @property
     def global_step(self):
@@ -358,9 +405,9 @@ class VocosEncodecExp(VocosExp):
         output = super().validation_step(*args, bandwidth_id=bandwidth_id)
         return output
 
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
         if self.global_rank == 0:
-            *_, audio_in, _ = outputs[0].values()
+            *_, audio_in, _ = self.validation_step_outputs[0].values()
             # Resynthesis with encodec for reference
             self.feature_extractor.encodec.set_target_bandwidth(self.feature_extractor.bandwidths[0])
             encodec_audio = self.feature_extractor.encodec(audio_in[None, None, :])
@@ -368,4 +415,4 @@ class VocosEncodecExp(VocosExp):
                 "encodec", encodec_audio[0, 0].data.cpu().numpy(), self.global_step, self.hparams.sample_rate,
             )
 
-        super().validation_epoch_end(outputs)
+        super().on_validation_epoch_end()

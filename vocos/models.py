@@ -35,6 +35,13 @@ class VocosBackbone(Backbone):
         layer_scale_init_value (float, optional): Initial value for layer scaling. Defaults to `1 / num_layers`.
         adanorm_num_embeddings (int, optional): Number of embeddings for AdaLayerNorm.
                                                 None means non-conditional model. Defaults to None.
+        causal (bool, optional): If True, convolutions use left-only (or left-heavy) padding so the model is
+            suitable for streaming inference. Weight shapes are identical to the non-causal model, so
+            pretrained non-causal checkpoints can be loaded for fine-tuning. Defaults to False.
+        lookahead_frames (int, optional): Only used when `causal=True`. Total number of future input frames
+            the model may attend to, distributed over the earliest conv layers (up to 3 per conv).
+            0 means strictly causal; small values (e.g. 4 frames = 4 * hop_length samples of latency)
+            recover most of the quality lost to strict causality. Defaults to 0.
     """
 
     def __init__(
@@ -45,10 +52,34 @@ class VocosBackbone(Backbone):
         num_layers: int,
         layer_scale_init_value: Optional[float] = None,
         adanorm_num_embeddings: Optional[int] = None,
+        causal: bool = False,
+        lookahead_frames: int = 0,
     ):
         super().__init__()
         self.input_channels = input_channels
-        self.embed = nn.Conv1d(input_channels, dim, kernel_size=7, padding=3)
+        self.causal = causal
+        if causal:
+            max_lookahead = 3 * (num_layers + 1)
+            if not 0 <= lookahead_frames <= max_lookahead:
+                raise ValueError(f"lookahead_frames must be in [0, {max_lookahead}] for num_layers={num_layers}")
+            # Distribute the lookahead budget over the earliest convs first, up to 3 frames each,
+            # so future context propagates through as many subsequent layers as possible.
+            budget = lookahead_frames
+            embed_lookahead = min(3, budget)
+            budget -= embed_lookahead
+            block_lookaheads = []
+            for _ in range(num_layers):
+                r = min(3, budget)
+                block_lookaheads.append(r)
+                budget -= r
+            self.lookahead_frames = lookahead_frames
+            self.embed_pad = (6 - embed_lookahead, embed_lookahead)
+            self.embed = nn.Conv1d(input_channels, dim, kernel_size=7, padding=0)
+        else:
+            self.lookahead_frames = 3 * (num_layers + 1)
+            block_lookaheads = [None] * num_layers
+            self.embed_pad = None
+            self.embed = nn.Conv1d(input_channels, dim, kernel_size=7, padding=3)
         self.adanorm = adanorm_num_embeddings is not None
         if adanorm_num_embeddings:
             self.norm = AdaLayerNorm(adanorm_num_embeddings, dim, eps=1e-6)
@@ -62,8 +93,9 @@ class VocosBackbone(Backbone):
                     intermediate_dim=intermediate_dim,
                     layer_scale_init_value=layer_scale_init_value,
                     adanorm_num_embeddings=adanorm_num_embeddings,
+                    lookahead=block_lookahead,
                 )
-                for _ in range(num_layers)
+                for block_lookahead in block_lookaheads
             ]
         )
         self.final_layer_norm = nn.LayerNorm(dim, eps=1e-6)
@@ -76,6 +108,8 @@ class VocosBackbone(Backbone):
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         bandwidth_id = kwargs.get('bandwidth_id', None)
+        if self.embed_pad is not None:
+            x = torch.nn.functional.pad(x, self.embed_pad)
         x = self.embed(x)
         if self.adanorm:
             assert bandwidth_id is not None
