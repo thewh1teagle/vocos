@@ -21,6 +21,7 @@ See the [examples](examples) folder for basic reconstruction and streaming infer
 
 | Model Name                                                                          | Dataset       | Training Iterations | Parameters 
 |-------------------------------------------------------------------------------------|---------------|-------------------|------------|
+| [thewh1teagle/vocos-mel-24khz-causal](https://huggingface.co/thewh1teagle/vocos-mel-24khz-causal) | LibriTTS-R + Hebrew podcasts | causal fine-tune | 13.5M
 | [charactr/vocos-mel-24khz](https://huggingface.co/charactr/vocos-mel-24khz)         | LibriTTS      | 1M                | 13.5M
 | [charactr/vocos-encodec-24khz](https://huggingface.co/charactr/vocos-encodec-24khz) | DNS Challenge | 2M                | 7.9M
 
