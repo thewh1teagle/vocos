@@ -8,7 +8,7 @@ Adversarial Network (GAN) objective, Vocos can generate waveforms in a single fo
 GAN-based vocoders, Vocos does not model audio samples in the time domain. Instead, it generates spectral
 coefficients, facilitating rapid audio reconstruction through inverse Fourier transform.
 
-This fork adds a causal backbone and streaming inference for real-time use.
+This fork of [gemelo-ai/vocos](https://github.com/gemelo-ai/vocos) adds a causal backbone and streaming inference for real-time use.
 
 ## Installation
 
