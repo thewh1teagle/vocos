@@ -1,14 +1,11 @@
-# Vocos: Closing the gap between time-domain and Fourier-based neural vocoders for high-quality audio synthesis
+# Vocos with causal streaming support
 
 [Audio samples](https://gemelo-ai.github.io/vocos/) |
 Paper [[abs]](https://arxiv.org/abs/2306.00814) [[pdf]](https://arxiv.org/pdf/2306.00814.pdf)
 
-Vocos is a fast neural vocoder designed to synthesize audio waveforms from acoustic features. Trained using a Generative
-Adversarial Network (GAN) objective, Vocos can generate waveforms in a single forward pass. Unlike other typical
-GAN-based vocoders, Vocos does not model audio samples in the time domain. Instead, it generates spectral
-coefficients, facilitating rapid audio reconstruction through inverse Fourier transform.
-
-This fork of [gemelo-ai/vocos](https://github.com/gemelo-ai/vocos) adds a causal backbone and streaming inference for real-time use.
+[Vocos](https://github.com/gemelo-ai/vocos) with a causal backbone and streaming inference for real-time use: mel frames
+go in chunk by chunk, audio comes out with ~85 ms latency, numerically identical to the offline forward pass. Weight-compatible
+with the pretrained Vocos checkpoints.
 
 ## Installation
 
@@ -39,26 +36,8 @@ find $VAL_DATASET_DIR -name *.wav > filelist.val
 Fill a config file, e.g. [vocos.yaml](configs%2Fvocos.yaml), with your filelist paths and start training with:
 
 ```bash
-python train.py -c configs/vocos.yaml
+uv run train.py -c configs/vocos.yaml
 ```
 
 Refer to [Pytorch Lightning documentation](https://lightning.ai/docs/pytorch/stable/) for details about customizing the
 training pipeline.
-
-## Citation
-
-If this code contributes to your research, please cite our work:
-
-```
-@article{siuzdak2023vocos,
-  title={Vocos: Closing the gap between time-domain and Fourier-based neural vocoders for high-quality audio synthesis},
-  author={Siuzdak, Hubert},
-  journal={arXiv preprint arXiv:2306.00814},
-  year={2023}
-}
-```
-
-## License
-
-The code in this repository is released under the MIT license as found in the
-[LICENSE](LICENSE) file.
