@@ -1,6 +1,8 @@
+import os
+
 from pytorch_lightning.cli import LightningCLI
 
 
 if __name__ == "__main__":
     cli = LightningCLI(run=False)
-    cli.trainer.fit(model=cli.model, datamodule=cli.datamodule)
+    cli.trainer.fit(model=cli.model, datamodule=cli.datamodule, ckpt_path=os.environ.get("CKPT_PATH"))
